@@ -281,6 +281,35 @@ def test_logs_and_returns_upstream_500_details(monkeypatch, caplog):
     assert 'Upstream request failed with status 500: {"errors":["NOT_FOUND"]}' in caplog.text
 
 
+def test_returns_problem_details_for_unknown_provider_error_code(monkeypatch, caplog):
+    @asynccontextmanager
+    async def fake_open_upstream_stream(_endpoint, _authorization):
+        yield UpstreamStream(
+            status_code=409,
+            body_stream=iter_bytes([b'{"errors":["CONFLICT"],"message":"Asset is locked"}']),
+            headers={"content-type": "application/json"},
+        )
+
+    monkeypatch.setattr("app.main.open_upstream_stream", fake_open_upstream_stream)
+
+    with caplog.at_level(logging.ERROR):
+        response = client.post(
+            "/api/transfers/download",
+            json={"endpoint": "https://provider.example/edc/public", "authorization": "token"},
+        )
+
+    assert response.status_code == 409
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Upstream provider error",
+        "status": 409,
+        "detail": "The EDC provider returned an error while processing the download request. Root cause: CONFLICT. Asset is locked",
+        "upstream_error": {"errors": ["CONFLICT"], "message": "Asset is locked"},
+    }
+    assert 'Upstream request failed with status 409: {"errors":["CONFLICT"],"message":"Asset is locked"}' in caplog.text
+
+
 def test_returns_502_for_upstream_transport_failure(monkeypatch, caplog):
     @asynccontextmanager
     async def fake_open_upstream_stream(_endpoint, _authorization):

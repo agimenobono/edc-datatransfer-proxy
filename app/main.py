@@ -34,6 +34,16 @@ def _problem_detail_for_upstream_error(parsed_body: object | None) -> str:
         if isinstance(errors, list) and "NOT_FOUND" in errors:
             return "The requested resource is no longer available from the EDC provider."
 
+        root_cause = errors[0] if isinstance(errors, list) and errors and isinstance(errors[0], str) else None
+        provider_message = parsed_body.get("message") if isinstance(parsed_body.get("message"), str) else None
+        if root_cause or provider_message:
+            parts = ["The EDC provider returned an error while processing the download request."]
+            if root_cause:
+                parts.append(f"Root cause: {root_cause}.")
+            if provider_message:
+                parts.append(provider_message)
+            return " ".join(parts)
+
     return "The upstream EDC provider rejected the download request."
 
 
