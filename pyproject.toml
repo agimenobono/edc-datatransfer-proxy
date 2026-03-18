@@ -1,0 +1,18 @@
+[project]
+name = "edc-datatransfer-proxy"
+version = "0.1.0"
+description = "Minimal FastAPI proxy for EDR-based data transfers"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.68,<1.0",
+    "httpx>=0.28,<1.0",
+    "uvicorn>=0.15,<1.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
