@@ -2,6 +2,11 @@
 
 Minimal FastAPI backend proxy for EDC data transfers driven by EDR data.
 
+The project supports two workflows:
+
+- local development with `uvicorn`, and
+- containerized execution with Docker and Docker Compose, so you can run it without installing Python dependencies on the host.
+
 ## Project goal
 
 The main goal of this project is to provide a small backend-for-frontend proxy that:
@@ -11,9 +16,23 @@ The main goal of this project is to provide a small backend-for-frontend proxy t
 - avoids browser CORS limitations, and
 - streams the upstream response back to the client with minimal transformation.
 
-## Run
+## Run with Docker
 
-Start the API with:
+Build and start the service with:
+
+```bash
+docker compose up --build
+```
+
+The API will be available at:
+
+```text
+http://localhost:8010/
+```
+
+## Local development
+
+For direct local development, install the project dependencies in a Python 3.13 environment and start the API with:
 
 ```bash
 uvicorn app.main:app --reload --port 8010
