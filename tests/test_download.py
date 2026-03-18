@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 import httpx
@@ -242,7 +243,29 @@ def test_preserves_non_2xx_status_and_body(monkeypatch):
     assert response.content == b"missing"
 
 
-def test_returns_502_for_upstream_transport_failure(monkeypatch):
+def test_logs_and_returns_upstream_500_details(monkeypatch, caplog):
+    @asynccontextmanager
+    async def fake_open_upstream_stream(_endpoint, _authorization):
+        yield UpstreamStream(
+            status_code=500,
+            body_stream=iter_bytes([b'{"errors":["NOT_FOUND"]}']),
+            headers={"content-type": "application/json"},
+        )
+
+    monkeypatch.setattr("app.main.open_upstream_stream", fake_open_upstream_stream)
+
+    with caplog.at_level(logging.ERROR):
+        response = client.post(
+            "/api/transfers/download",
+            json={"endpoint": "https://provider.example/edc/public", "authorization": "token"},
+        )
+
+    assert response.status_code == 500
+    assert response.content == b'{"errors":["NOT_FOUND"]}'
+    assert 'Upstream request failed with status 500: {"errors":["NOT_FOUND"]}' in caplog.text
+
+
+def test_returns_502_for_upstream_transport_failure(monkeypatch, caplog):
     @asynccontextmanager
     async def fake_open_upstream_stream(_endpoint, _authorization):
         raise httpx.ConnectError("boom")
@@ -250,9 +273,12 @@ def test_returns_502_for_upstream_transport_failure(monkeypatch):
 
     monkeypatch.setattr("app.main.open_upstream_stream", fake_open_upstream_stream)
 
-    response = client.post(
-        "/api/transfers/download",
-        json={"endpoint": "https://provider.example/edc/public", "authorization": "token"},
-    )
+    with caplog.at_level(logging.ERROR):
+        response = client.post(
+            "/api/transfers/download",
+            json={"endpoint": "https://provider.example/edc/public", "authorization": "token"},
+        )
 
     assert response.status_code == 502
+    assert response.content == b'{"detail":"boom"}'
+    assert "Upstream request failed: boom" in caplog.text

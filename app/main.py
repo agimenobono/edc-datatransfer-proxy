@@ -1,5 +1,8 @@
+import logging
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from fastapi.responses import RedirectResponse
 from fastapi.responses import StreamingResponse
 
@@ -9,6 +12,7 @@ from app.models import DownloadRequest
 from app.proxy import open_upstream_stream
 
 
+logger = logging.getLogger(__name__)
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -30,7 +34,25 @@ async def download(payload: DownloadRequest):
     try:
         upstream = await upstream_context.__aenter__()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail="Failed to fetch upstream response") from exc
+        logger.exception("Upstream request failed: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if upstream.status_code >= 400:
+        try:
+            body = b"".join([chunk async for chunk in upstream.body_stream])
+        finally:
+            await upstream_context.__aexit__(None, None, None)
+
+        logger.error(
+            "Upstream request failed with status %s: %s",
+            upstream.status_code,
+            body.decode("utf-8", errors="replace"),
+        )
+        return Response(
+            content=body,
+            status_code=upstream.status_code,
+            headers=upstream.headers,
+        )
 
     async def body_iterator():
         try:
