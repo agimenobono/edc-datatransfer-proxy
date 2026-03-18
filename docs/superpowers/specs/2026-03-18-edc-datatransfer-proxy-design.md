@@ -12,6 +12,7 @@ Included in this first version:
 - One FastAPI endpoint: `POST /api/transfers/download`
 - Built-in FastAPI Swagger UI
 - Friendly root route redirecting `/` to `/docs`
+- Documented local runtime port `8010`
 - Strict request validation for exactly `endpoint` and `authorization`
 - Endpoint normalization by appending a trailing `/` if missing
 - Upstream `GET` request using the raw authorization value exactly as received
@@ -35,6 +36,11 @@ Explicitly out of scope:
 
 - `GET /` redirects to `/docs`
 - `GET /docs` serves FastAPI Swagger UI
+
+### Local Runtime
+
+- Local development should run the service on port `8010`
+- Swagger UI is therefore expected at `http://localhost:8010/docs`
 
 ### Request Body
 
@@ -155,6 +161,11 @@ Documentation flow:
 2. FastAPI returns a redirect response to `/docs`.
 3. FastAPI serves Swagger UI from `/docs`.
 
+Local run flow:
+1. Developer starts the app with `uvicorn` on port `8010`.
+2. Browser requests `http://localhost:8010/`.
+3. FastAPI redirects to `http://localhost:8010/docs`.
+
 ## Error Handling
 
 Minimal error handling for this version:
@@ -203,7 +214,7 @@ Test levels:
 
 ### Task 1: Scaffold the backend structure
 
-Create the initial application layout for FastAPI, enable Swagger UI, add the root redirect, and define the request model and proxy service module.
+Create the initial application layout for FastAPI, enable Swagger UI, add the root redirect, document port `8010`, and define the request model and proxy service module.
 
 ### Task 2: Implement strict request validation
 
@@ -230,6 +241,7 @@ Cover Swagger UI availability, root redirect behavior, schema strictness, URL no
 - `POST /api/transfers/download` exists and is reachable
 - `GET /docs` serves Swagger UI
 - `GET /` redirects to `/docs`
+- Local run documentation uses port `8010`
 - The request body accepts exactly `endpoint` and `authorization`
 - Blank, malformed, and unsupported endpoint URLs are rejected
 - Endpoints containing `?` or `#` are rejected
