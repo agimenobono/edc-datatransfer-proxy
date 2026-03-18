@@ -223,7 +223,7 @@ def test_streams_successful_upstream_response(monkeypatch):
     assert response.headers["content-type"].startswith("text/plain")
 
 
-def test_preserves_non_2xx_status_and_body(monkeypatch):
+def test_returns_problem_details_for_non_json_upstream_error(monkeypatch, caplog):
     @asynccontextmanager
     async def fake_open_upstream_stream(_endpoint, _authorization):
         yield UpstreamStream(
@@ -234,13 +234,22 @@ def test_preserves_non_2xx_status_and_body(monkeypatch):
 
     monkeypatch.setattr("app.main.open_upstream_stream", fake_open_upstream_stream)
 
-    response = client.post(
-        "/api/transfers/download",
-        json={"endpoint": "https://provider.example/edc/public", "authorization": "token"},
-    )
+    with caplog.at_level(logging.ERROR):
+        response = client.post(
+            "/api/transfers/download",
+            json={"endpoint": "https://provider.example/edc/public", "authorization": "token"},
+        )
 
     assert response.status_code == 404
-    assert response.content == b"missing"
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Upstream provider error",
+        "status": 404,
+        "detail": "The upstream EDC provider rejected the download request.",
+        "upstream_error": {"raw_body": "missing"},
+    }
+    assert "Upstream request failed with status 404: missing" in caplog.text
 
 
 def test_logs_and_returns_upstream_500_details(monkeypatch, caplog):
@@ -261,7 +270,14 @@ def test_logs_and_returns_upstream_500_details(monkeypatch, caplog):
         )
 
     assert response.status_code == 500
-    assert response.content == b'{"errors":["NOT_FOUND"]}'
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json() == {
+        "type": "about:blank",
+        "title": "Upstream provider error",
+        "status": 500,
+        "detail": "The requested resource is no longer available from the EDC provider.",
+        "upstream_error": {"errors": ["NOT_FOUND"]},
+    }
     assert 'Upstream request failed with status 500: {"errors":["NOT_FOUND"]}' in caplog.text
 
 

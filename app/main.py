@@ -1,8 +1,9 @@
 import logging
+from json import JSONDecodeError, loads
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse
 from fastapi.responses import StreamingResponse
 
@@ -27,6 +28,38 @@ async def root():
     return RedirectResponse(url="/docs")
 
 
+def _problem_detail_for_upstream_error(parsed_body: object | None) -> str:
+    if isinstance(parsed_body, dict):
+        errors = parsed_body.get("errors")
+        if isinstance(errors, list) and "NOT_FOUND" in errors:
+            return "The requested resource is no longer available from the EDC provider."
+
+    return "The upstream EDC provider rejected the download request."
+
+
+def _build_problem_response(status_code: int, body: bytes) -> JSONResponse:
+    raw_body = body.decode("utf-8", errors="replace")
+
+    try:
+        parsed_body = loads(raw_body)
+    except JSONDecodeError:
+        parsed_body = None
+
+    upstream_error = parsed_body if isinstance(parsed_body, dict) else {"raw_body": raw_body}
+
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "type": "about:blank",
+            "title": "Upstream provider error",
+            "status": status_code,
+            "detail": _problem_detail_for_upstream_error(parsed_body),
+            "upstream_error": upstream_error,
+        },
+        media_type="application/problem+json",
+    )
+
+
 @app.post("/api/transfers/download")
 async def download(payload: DownloadRequest):
     upstream_context = open_upstream_stream(payload.endpoint, payload.authorization)
@@ -48,11 +81,7 @@ async def download(payload: DownloadRequest):
             upstream.status_code,
             body.decode("utf-8", errors="replace"),
         )
-        return Response(
-            content=body,
-            status_code=upstream.status_code,
-            headers=upstream.headers,
-        )
+        return _build_problem_response(upstream.status_code, body)
 
     async def body_iterator():
         try:
