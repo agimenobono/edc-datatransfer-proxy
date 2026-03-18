@@ -10,6 +10,8 @@ Build a minimal Python backend proxy that accepts an EDR-derived payload, fetche
 
 Included in this first version:
 - One FastAPI endpoint: `POST /api/transfers/download`
+- Built-in FastAPI Swagger UI
+- Friendly root route redirecting `/` to `/docs`
 - Strict request validation for exactly `endpoint` and `authorization`
 - Endpoint normalization by appending a trailing `/` if missing
 - Upstream `GET` request using the raw authorization value exactly as received
@@ -29,6 +31,11 @@ Explicitly out of scope:
 
 `POST /api/transfers/download`
 
+### Documentation Routes
+
+- `GET /` redirects to `/docs`
+- `GET /docs` serves FastAPI Swagger UI
+
 ### Request Body
 
 The API accepts a strict JSON object with exactly these fields:
@@ -43,6 +50,7 @@ The API accepts a strict JSON object with exactly these fields:
 Rules:
 - `endpoint` is required
 - `authorization` is required
+- `endpoint` must be a non-empty absolute `http` or `https` URL
 - Extra fields are rejected
 - The proxy must not prepend `Bearer`
 - The proxy must not rewrite the endpoint beyond ensuring a trailing `/`
@@ -57,6 +65,7 @@ Response expectations for this version:
 - Follow upstream redirects
 - Preserve the upstream status code for both success and non-success upstream responses
 - Forward upstream `content-type` when present
+- Omit downstream `content-type` when the upstream response does not provide one
 - Return `502 Bad Gateway` for upstream transport failures
 
 ## Architecture
@@ -77,6 +86,8 @@ This boundary keeps HTTP validation concerns separate from network behavior whil
 
 Responsibilities:
 - Initialize the FastAPI application
+- Keep built-in Swagger UI enabled
+- Redirect the root route to `/docs`
 - Register `POST /api/transfers/download`
 - Accept the strict request model
 - Translate service results into a streamed response
@@ -95,7 +106,7 @@ Responsibilities:
 
 Notes:
 - Validation should be strict enough to reject unrelated keys
-- Any further semantic URL checks should stay minimal to avoid deviating from the PRD
+- Validation should reject blank endpoints and unsupported or malformed non-absolute URLs
 
 ### Proxy Service
 
@@ -120,7 +131,7 @@ The proxy service should expose a focused result object or equivalent structure 
 - `body_stream`: async byte iterator from the upstream response
 - `headers`: a minimal mapping containing `content-type` when the upstream response provides it
 
-No broader header passthrough is required in this version.
+No broader header passthrough is required in this version. If the upstream response has no `content-type`, the service should return no `content-type` header.
 
 Streaming ownership rule:
 - The layer that opens the upstream streamed response must keep it open until the downstream `StreamingResponse` finishes consuming `body_stream`
@@ -138,6 +149,11 @@ Streaming ownership rule:
    - redirect following enabled
 6. The upstream response body is exposed as an async byte stream.
 7. FastAPI returns a `StreamingResponse` backed by that stream.
+
+Documentation flow:
+1. Browser requests `GET /`.
+2. FastAPI returns a redirect response to `/docs`.
+3. FastAPI serves Swagger UI from `/docs`.
 
 ## Error Handling
 
@@ -166,8 +182,11 @@ Minimal error handling for this version:
 The test suite should stay focused on the PRD rules and proxy behavior.
 
 Required coverage:
+- `GET /docs` serves the Swagger UI page
+- `GET /` redirects to `/docs`
 - Request validation accepts a payload with exactly `endpoint` and `authorization`
 - Request validation rejects extra fields
+- Request validation rejects blank or unsupported endpoint URLs
 - Request validation rejects endpoints containing `?` or `#`
 - Endpoint normalization adds a trailing `/` when missing
 - Authorization header is forwarded unchanged
@@ -184,11 +203,11 @@ Test levels:
 
 ### Task 1: Scaffold the backend structure
 
-Create the initial application layout for FastAPI, the request model, and the proxy service module.
+Create the initial application layout for FastAPI, enable Swagger UI, add the root redirect, and define the request model and proxy service module.
 
 ### Task 2: Implement strict request validation
 
-Define the request schema so only `endpoint` and `authorization` are accepted, with extra fields rejected and endpoints containing `?` or `#` rejected.
+Define the request schema so only `endpoint` and `authorization` are accepted, with extra fields rejected and invalid endpoint values rejected if they are blank, non-absolute, non-HTTP(S), or contain `?` or `#`.
 
 ### Task 3: Implement the proxy service
 
@@ -204,12 +223,15 @@ Translate upstream transport failures into `502 Bad Gateway` and preserve upstre
 
 ### Task 6: Add focused automated tests
 
-Cover schema strictness, URL normalization, authorization forwarding, stream passthrough, and upstream failure handling.
+Cover Swagger UI availability, root redirect behavior, schema strictness, URL normalization, authorization forwarding, stream passthrough, and upstream failure handling.
 
 ## Acceptance Criteria
 
 - `POST /api/transfers/download` exists and is reachable
+- `GET /docs` serves Swagger UI
+- `GET /` redirects to `/docs`
 - The request body accepts exactly `endpoint` and `authorization`
+- Blank, malformed, and unsupported endpoint URLs are rejected
 - Endpoints containing `?` or `#` are rejected
 - The proxy appends a trailing `/` when missing and makes no other endpoint changes
 - The proxy forwards the authorization value exactly as received, without prepending `Bearer`
