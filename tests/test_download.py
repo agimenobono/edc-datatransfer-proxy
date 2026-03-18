@@ -30,6 +30,19 @@ def test_root_redirects_to_docs():
     assert response.headers["location"] == "/docs"
 
 
+def test_cors_preflight_is_allowed():
+    response = client.options(
+        "/api/transfers/download",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
+
+
 def test_accepts_exact_required_fields(monkeypatch):
     @asynccontextmanager
     async def fake_open_upstream_stream(endpoint, authorization):
@@ -53,6 +66,30 @@ def test_accepts_exact_required_fields(monkeypatch):
 
     assert response.status_code == 200
     assert response.content == b"ok"
+
+
+def test_cors_header_is_present_on_download_response(monkeypatch):
+    @asynccontextmanager
+    async def fake_open_upstream_stream(_endpoint, _authorization):
+        yield UpstreamStream(
+            status_code=200,
+            body_stream=iter_bytes([b"ok"]),
+            headers={"content-type": "text/plain"},
+        )
+
+    monkeypatch.setattr("app.main.open_upstream_stream", fake_open_upstream_stream)
+
+    response = client.post(
+        "/api/transfers/download",
+        headers={"Origin": "http://localhost:3000"},
+        json={
+            "endpoint": "https://provider.example/edc/public",
+            "authorization": "token",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"
 
 
 def test_rejects_extra_fields():
