@@ -243,10 +243,15 @@ def test_returns_problem_details_for_non_json_upstream_error(monkeypatch, caplog
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/problem+json")
     assert response.json() == {
-        "type": "about:blank",
-        "title": "Upstream provider error",
+        "type": "urn:problem:upstream-provider-failure",
+        "title": "External provider error",
         "status": 404,
         "detail": "The upstream EDC provider rejected the download request.",
+        "code": "UPSTREAM_PROVIDER_FAILURE",
+        "target": {
+            "operation": "download",
+            "resource": "https://provider.example/edc/public",
+        },
         "upstream_error": {"raw_body": "missing"},
     }
     assert "Upstream request failed with status 404: missing" in caplog.text
@@ -272,10 +277,15 @@ def test_logs_and_returns_upstream_500_details(monkeypatch, caplog):
     assert response.status_code == 500
     assert response.headers["content-type"].startswith("application/problem+json")
     assert response.json() == {
-        "type": "about:blank",
-        "title": "Upstream provider error",
+        "type": "urn:problem:upstream-provider-failure",
+        "title": "External provider error",
         "status": 500,
         "detail": "The requested resource is no longer available from the EDC provider.",
+        "code": "UPSTREAM_PROVIDER_FAILURE",
+        "target": {
+            "operation": "download",
+            "resource": "https://provider.example/edc/public",
+        },
         "upstream_error": {"errors": ["NOT_FOUND"]},
     }
     assert 'Upstream request failed with status 500: {"errors":["NOT_FOUND"]}' in caplog.text
@@ -301,13 +311,41 @@ def test_returns_problem_details_for_unknown_provider_error_code(monkeypatch, ca
     assert response.status_code == 409
     assert response.headers["content-type"].startswith("application/problem+json")
     assert response.json() == {
-        "type": "about:blank",
-        "title": "Upstream provider error",
+        "type": "urn:problem:upstream-provider-failure",
+        "title": "External provider error",
         "status": 409,
         "detail": "The EDC provider returned an error while processing the download request. Root cause: CONFLICT. Asset is locked",
+        "code": "UPSTREAM_PROVIDER_FAILURE",
+        "target": {
+            "operation": "download",
+            "resource": "https://provider.example/edc/public",
+        },
         "upstream_error": {"errors": ["CONFLICT"], "message": "Asset is locked"},
     }
     assert 'Upstream request failed with status 409: {"errors":["CONFLICT"],"message":"Asset is locked"}' in caplog.text
+
+
+def test_problem_target_uses_original_payload_endpoint(monkeypatch):
+    @asynccontextmanager
+    async def fake_open_upstream_stream(_endpoint, _authorization):
+        yield UpstreamStream(
+            status_code=404,
+            body_stream=iter_bytes([b"missing"]),
+            headers={"content-type": "text/plain"},
+        )
+
+    monkeypatch.setattr("app.main.open_upstream_stream", fake_open_upstream_stream)
+
+    response = client.post(
+        "/api/transfers/download",
+        json={"endpoint": "https://provider.example/edc/public", "authorization": "token"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["target"] == {
+        "operation": "download",
+        "resource": "https://provider.example/edc/public",
+    }
 
 
 def test_returns_502_for_upstream_transport_failure(monkeypatch, caplog):
@@ -325,5 +363,16 @@ def test_returns_502_for_upstream_transport_failure(monkeypatch, caplog):
         )
 
     assert response.status_code == 502
-    assert response.content == b'{"detail":"boom"}'
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json() == {
+        "type": "urn:problem:upstream-provider-failure",
+        "title": "External provider error",
+        "status": 502,
+        "detail": "The request could not be completed because an external provider failed.",
+        "code": "UPSTREAM_PROVIDER_FAILURE",
+        "target": {
+            "operation": "download",
+            "resource": "https://provider.example/edc/public",
+        },
+    }
     assert "Upstream request failed: boom" in caplog.text

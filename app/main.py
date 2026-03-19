@@ -1,7 +1,7 @@
 import logging
 from json import JSONDecodeError, loads
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse
@@ -47,7 +47,33 @@ def _problem_detail_for_upstream_error(parsed_body: object | None) -> str:
     return "The upstream EDC provider rejected the download request."
 
 
-def _build_problem_response(status_code: int, body: bytes) -> JSONResponse:
+def _build_problem_content(status_code: int, detail: str, endpoint: str) -> dict[str, object]:
+    return {
+        "type": "urn:problem:upstream-provider-failure",
+        "title": "External provider error",
+        "status": status_code,
+        "detail": detail,
+        "code": "UPSTREAM_PROVIDER_FAILURE",
+        "target": {
+            "operation": "download",
+            "resource": endpoint,
+        },
+    }
+
+
+def _build_transport_problem_response(endpoint: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=502,
+        content=_build_problem_content(
+            status_code=502,
+            detail="The request could not be completed because an external provider failed.",
+            endpoint=endpoint,
+        ),
+        media_type="application/problem+json",
+    )
+
+
+def _build_upstream_problem_response(status_code: int, body: bytes, endpoint: str) -> JSONResponse:
     raw_body = body.decode("utf-8", errors="replace")
 
     try:
@@ -55,17 +81,21 @@ def _build_problem_response(status_code: int, body: bytes) -> JSONResponse:
     except JSONDecodeError:
         parsed_body = None
 
-    upstream_error = parsed_body if isinstance(parsed_body, dict) else {"raw_body": raw_body}
+    content = _build_problem_content(
+        status_code=status_code,
+        detail=_problem_detail_for_upstream_error(parsed_body),
+        endpoint=endpoint,
+    )
+
+    if raw_body:
+        if isinstance(parsed_body, dict):
+            content["upstream_error"] = parsed_body
+        else:
+            content["upstream_error"] = {"raw_body": raw_body}
 
     return JSONResponse(
         status_code=status_code,
-        content={
-            "type": "about:blank",
-            "title": "Upstream provider error",
-            "status": status_code,
-            "detail": _problem_detail_for_upstream_error(parsed_body),
-            "upstream_error": upstream_error,
-        },
+        content=content,
         media_type="application/problem+json",
     )
 
@@ -78,7 +108,7 @@ async def download(payload: DownloadRequest):
         upstream = await upstream_context.__aenter__()
     except httpx.HTTPError as exc:
         logger.exception("Upstream request failed: %s", exc)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return _build_transport_problem_response(payload.endpoint)
 
     if upstream.status_code >= 400:
         try:
@@ -91,7 +121,7 @@ async def download(payload: DownloadRequest):
             upstream.status_code,
             body.decode("utf-8", errors="replace"),
         )
-        return _build_problem_response(upstream.status_code, body)
+        return _build_upstream_problem_response(upstream.status_code, body, payload.endpoint)
 
     async def body_iterator():
         try:
