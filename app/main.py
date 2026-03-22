@@ -1,19 +1,21 @@
 import logging
 from json import JSONDecodeError, loads
+from time import monotonic
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
 import httpx
 
 from app.models import DownloadRequest
-from app.proxy import open_upstream_stream
+from app.proxy import open_upstream_stream, response_cache
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -23,9 +25,46 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def log_cache_configuration():
+    config = response_cache.configuration()
+    logger.info(
+        "Response cache configured: enabled=%s backend=%s cache_dir=%s max_entries=%s ttl_seconds=%s max_memory_bytes=%s max_disk_bytes=%s",
+        config.enabled,
+        config.backend,
+        config.cache_dir,
+        config.max_entries,
+        config.ttl_seconds,
+        config.max_memory_bytes,
+        config.max_disk_bytes,
+    )
+
+
 @app.get("/", include_in_schema=False)
 async def root():
     return RedirectResponse(url="/docs")
+
+
+@app.get("/api/cache/stats")
+async def cache_stats():
+    stats = response_cache.stats()
+    return {
+        "entries": stats.entries,
+        "memory_entries": stats.memory_entries,
+        "disk_entries": stats.disk_entries,
+        "memory_bytes": stats.memory_bytes,
+        "disk_bytes": stats.disk_bytes,
+        "hits": {
+            "memory": stats.hits_memory,
+            "disk": stats.hits_disk,
+        },
+        "misses": stats.misses,
+        "expired": stats.expired,
+        "evictions": {
+            "memory": stats.evictions_memory,
+            "disk": stats.evictions_disk,
+        },
+    }
 
 
 def _problem_detail_for_upstream_error(parsed_body: object | None) -> str:
@@ -102,6 +141,7 @@ def _build_upstream_problem_response(status_code: int, body: bytes, endpoint: st
 
 @app.post("/api/transfers/download")
 async def download(payload: DownloadRequest):
+    started_at = monotonic()
     upstream_context = open_upstream_stream(payload.endpoint, payload.authorization)
 
     try:
@@ -110,17 +150,36 @@ async def download(payload: DownloadRequest):
         logger.exception("Upstream request failed: %s", exc)
         return _build_transport_problem_response(payload.endpoint)
 
+    transfer_started_at = monotonic()
+
+    def log_response(status_code: int, cached: bool, transfer_ms: int, body: bytes | None = None) -> None:
+        total_ms = int((monotonic() - started_at) * 1000)
+        if body is None:
+            logger.info(
+                "Download completed total_ms=%s transfer_ms=%s cached=%s status=%s",
+                total_ms,
+                transfer_ms,
+                cached,
+                status_code,
+            )
+            return
+        logger.error(
+            "Upstream request failed status=%s total_ms=%s transfer_ms=%s cached=%s body=%s",
+            status_code,
+            total_ms,
+            transfer_ms,
+            cached,
+            body.decode("utf-8", errors="replace"),
+        )
+
     if upstream.status_code >= 400:
         try:
             body = b"".join([chunk async for chunk in upstream.body_stream])
         finally:
             await upstream_context.__aexit__(None, None, None)
 
-        logger.error(
-            "Upstream request failed with status %s: %s",
-            upstream.status_code,
-            body.decode("utf-8", errors="replace"),
-        )
+        transfer_ms = 0 if upstream.cached else int((monotonic() - transfer_started_at) * 1000)
+        log_response(upstream.status_code, upstream.cached, transfer_ms, body)
         return _build_upstream_problem_response(upstream.status_code, body, payload.endpoint)
 
     async def body_iterator():
@@ -130,8 +189,13 @@ async def download(payload: DownloadRequest):
         finally:
             await upstream_context.__aexit__(None, None, None)
 
+    def log_success() -> None:
+        transfer_ms = 0 if upstream.cached else int((monotonic() - transfer_started_at) * 1000)
+        log_response(upstream.status_code, upstream.cached, transfer_ms)
+
     return StreamingResponse(
         body_iterator(),
         status_code=upstream.status_code,
         headers=upstream.headers,
+        background=BackgroundTask(log_success),
     )

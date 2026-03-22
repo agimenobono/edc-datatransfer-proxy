@@ -13,6 +13,8 @@ def test_project_defines_container_workflow_and_local_uvicorn_docs():
     assert "FROM python:3.13-slim" in dockerfile
     assert 'CMD ["uvicorn", "app.main:app"' in dockerfile
     assert "8010:8010" in compose
+    assert "PROXY_CACHE_DIR: /var/cache/edc-proxy" in compose
+    assert "edc-proxy-cache:/var/cache/edc-proxy" in compose
     assert "docker compose up --build" in readme
     assert "uvicorn app.main:app --reload --port 8010" in readme
     assert 'requires-python = ">=3.13"' in pyproject

@@ -1,12 +1,20 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+import importlib
 
 import httpx
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.proxy import UpstreamStream, build_http_client, normalize_endpoint, open_upstream_stream
+from app.proxy import (
+    CachedUpstreamResponse,
+    UpstreamResponseCache,
+    UpstreamStream,
+    build_http_client,
+    normalize_endpoint,
+    open_upstream_stream,
+)
 
 
 client = TestClient(app)
@@ -29,6 +37,40 @@ def test_root_redirects_to_docs():
 
     assert response.status_code in (307, 308)
     assert response.headers["location"] == "/docs"
+
+
+def test_startup_logs_cache_configuration(monkeypatch, caplog):
+    class FakeResponseCache:
+        def configuration(self):
+            return type(
+                "Config",
+                (),
+                {
+                    "enabled": False,
+                    "backend": "disabled",
+                    "cache_dir": "/var/cache/edc-proxy",
+                    "max_entries": 128,
+                    "ttl_seconds": 300,
+                    "max_memory_bytes": 1_000_000,
+                    "max_disk_bytes": 100_000_000,
+                },
+            )()
+
+    monkeypatch.setattr("app.main.response_cache", FakeResponseCache())
+
+    with caplog.at_level(logging.INFO):
+        with TestClient(app):
+            pass
+
+    assert "Response cache configured: enabled=False" in caplog.text
+    assert "backend=disabled" in caplog.text
+    assert "cache_dir=/var/cache/edc-proxy" in caplog.text
+
+
+def test_app_logger_uses_uvicorn_error_logger():
+    from app.main import logger
+
+    assert logger.name == "uvicorn.error"
 
 
 def test_cors_preflight_is_allowed():
@@ -202,6 +244,253 @@ def test_proxy_follows_redirects():
     asyncio.run(run())
 
 
+def test_proxy_caches_successful_responses(monkeypatch):
+    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=60, max_memory_bytes=1024, max_disk_bytes=1024)
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"cached":true}',
+            request=request,
+        )
+
+    async def fetch():
+        async with build_http_client(transport=httpx.MockTransport(handler)) as upstream_client:
+            async with open_upstream_stream(
+                "https://provider.example/edc/public",
+                "token",
+                client=upstream_client,
+            ) as upstream:
+                body = b"".join([chunk async for chunk in upstream.body_stream])
+                return upstream.status_code, upstream.headers, body
+
+    first = asyncio.run(fetch())
+    second = asyncio.run(fetch())
+
+    assert calls == ["https://provider.example/edc/public/"]
+    assert first == (200, {"content-type": "application/json"}, b'{"cached":true}')
+    assert second == (200, {"content-type": "application/json"}, b'{"cached":true}')
+    assert vars(cache.stats()) == {
+        "entries": 1,
+        "memory_entries": 1,
+        "disk_entries": 0,
+        "memory_bytes": len(b'{"cached":true}'),
+        "disk_bytes": 0,
+        "hits_memory": 1,
+        "hits_disk": 0,
+        "misses": 1,
+        "expired": 0,
+        "evictions_memory": 0,
+        "evictions_disk": 0,
+    }
+
+
+def test_proxy_cache_can_be_disabled_from_env(monkeypatch):
+    monkeypatch.setenv("PROXY_CACHE_ENABLED", "false")
+
+    import app.proxy as proxy_module
+
+    reloaded = importlib.reload(proxy_module)
+
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"cached":false}',
+            request=request,
+        )
+
+    async def fetch():
+        async with reloaded.build_http_client(transport=httpx.MockTransport(handler)) as upstream_client:
+            async with reloaded.open_upstream_stream(
+                "https://provider.example/edc/public",
+                "token",
+                client=upstream_client,
+            ) as upstream:
+                body = b"".join([chunk async for chunk in upstream.body_stream])
+                return upstream.status_code, upstream.headers, body
+
+    first = asyncio.run(fetch())
+    second = asyncio.run(fetch())
+
+    assert calls == [
+        "https://provider.example/edc/public/",
+        "https://provider.example/edc/public/",
+    ]
+    assert first == (200, {"content-type": "application/json"}, b'{"cached":false}')
+    assert second == (200, {"content-type": "application/json"}, b'{"cached":false}')
+    assert isinstance(reloaded.response_cache, reloaded.DisabledUpstreamResponseCache)
+    monkeypatch.delenv("PROXY_CACHE_ENABLED", raising=False)
+    importlib.reload(proxy_module)
+
+
+def test_proxy_uses_lru_eviction(monkeypatch):
+    cache = UpstreamResponseCache(max_entries=1, ttl_seconds=60, max_memory_bytes=1024, max_disk_bytes=1024)
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+
+    cache.set(
+        "https://provider.example/edc/public",
+        "token-a",
+        CachedUpstreamResponse(status_code=200, body=b"a", headers={"content-type": "text/plain"}),
+    )
+    cache.set(
+        "https://provider.example/edc/other",
+        "token-b",
+        CachedUpstreamResponse(status_code=200, body=b"b", headers={"content-type": "text/plain"}),
+    )
+
+    assert cache.get("https://provider.example/edc/public", "token-a") is None
+    cached = cache.get("https://provider.example/edc/other", "token-b")
+    assert cached is not None
+    assert cached.body == b"b"
+
+
+def test_proxy_expires_cached_responses(monkeypatch):
+    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=0, max_memory_bytes=1024, max_disk_bytes=1024)
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+
+    cache.set(
+        "https://provider.example/edc/public",
+        "token",
+        CachedUpstreamResponse(status_code=200, body=b"a", headers={"content-type": "text/plain"}),
+    )
+
+    assert cache.get("https://provider.example/edc/public", "token") is None
+    assert vars(cache.stats()) == {
+        "entries": 0,
+        "memory_entries": 0,
+        "disk_entries": 0,
+        "memory_bytes": 0,
+        "disk_bytes": 0,
+        "hits_memory": 0,
+        "hits_disk": 0,
+        "misses": 1,
+        "expired": 1,
+        "evictions_memory": 0,
+        "evictions_disk": 0,
+    }
+
+
+def test_cache_stats_endpoint_reports_counts(monkeypatch):
+    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=60, max_memory_bytes=1024, max_disk_bytes=1024)
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+    monkeypatch.setattr("app.main.response_cache", cache)
+
+    cache.set(
+        "https://provider.example/edc/public",
+        "token",
+        CachedUpstreamResponse(status_code=200, body=b"abc", headers={"content-type": "text/plain"}),
+    )
+
+    assert cache.get("https://provider.example/edc/public", "token") is not None
+    assert cache.get("https://provider.example/edc/missing", "token") is None
+
+    response = client.get("/api/cache/stats")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "entries": 1,
+        "memory_entries": 1,
+        "disk_entries": 0,
+        "memory_bytes": 3,
+        "disk_bytes": 0,
+        "hits": {"memory": 1, "disk": 0},
+        "misses": 1,
+        "expired": 0,
+        "evictions": {"memory": 0, "disk": 0},
+    }
+
+
+def test_proxy_stores_large_responses_on_disk(monkeypatch, tmp_path):
+    cache = UpstreamResponseCache(
+        max_entries=8,
+        ttl_seconds=60,
+        max_memory_bytes=8,
+        max_disk_bytes=1024,
+        cache_dir=str(tmp_path),
+    )
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/octet-stream"},
+            content=b"0123456789abcdef",
+            request=request,
+        )
+
+    async def fetch():
+        async with build_http_client(transport=httpx.MockTransport(handler)) as upstream_client:
+            async with open_upstream_stream(
+                "https://provider.example/edc/public",
+                "token",
+                client=upstream_client,
+            ) as upstream:
+                body = b"".join([chunk async for chunk in upstream.body_stream])
+                return upstream.status_code, upstream.headers, body
+
+    first = asyncio.run(fetch())
+    second = asyncio.run(fetch())
+
+    assert calls == ["https://provider.example/edc/public/"]
+    assert first == (200, {"content-type": "application/octet-stream"}, b"0123456789abcdef")
+    assert second == (200, {"content-type": "application/octet-stream"}, b"0123456789abcdef")
+    entry = cache.get("https://provider.example/edc/public", "token")
+    assert entry is not None
+    assert entry.tier == "disk"
+    assert entry.file_path is not None
+    assert entry.file_path.exists()
+    assert vars(cache.stats()) == {
+        "entries": 1,
+        "memory_entries": 0,
+        "disk_entries": 1,
+        "memory_bytes": 0,
+        "disk_bytes": 16,
+        "hits_memory": 0,
+        "hits_disk": 2,
+        "misses": 1,
+        "expired": 0,
+        "evictions_memory": 0,
+        "evictions_disk": 0,
+    }
+
+
+def test_proxy_does_not_cache_failed_responses(monkeypatch):
+    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=60, max_memory_bytes=1024, max_disk_bytes=1024)
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+
+    def handler(request):
+        return httpx.Response(404, content=b"missing", request=request)
+
+    async def fetch():
+        async with build_http_client(transport=httpx.MockTransport(handler)) as upstream_client:
+            async with open_upstream_stream(
+                "https://provider.example/edc/public",
+                "token",
+                client=upstream_client,
+            ) as upstream:
+                body = b"".join([chunk async for chunk in upstream.body_stream])
+                return upstream.status_code, body
+
+    first = asyncio.run(fetch())
+    second = asyncio.run(fetch())
+
+    assert first == (404, b"missing")
+    assert second == (404, b"missing")
+    assert cache.get("https://provider.example/edc/public", "token") is None
+
+
 def test_streams_successful_upstream_response(monkeypatch):
     @asynccontextmanager
     async def fake_open_upstream_stream(_endpoint, _authorization):
@@ -221,6 +510,55 @@ def test_streams_successful_upstream_response(monkeypatch):
     assert response.status_code == 200
     assert response.content == b"hello world"
     assert response.headers["content-type"].startswith("text/plain")
+
+
+def test_logs_response_time_for_uncached_download(monkeypatch, caplog):
+    @asynccontextmanager
+    async def fake_open_upstream_stream(_endpoint, _authorization):
+        yield UpstreamStream(
+            status_code=200,
+            body_stream=iter_bytes([b"hello"]),
+            headers={"content-type": "text/plain"},
+        )
+
+    monkeypatch.setattr("app.main.open_upstream_stream", fake_open_upstream_stream)
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/api/transfers/download",
+            json={"endpoint": "https://provider.example/edc/public", "authorization": "token"},
+        )
+
+    assert response.status_code == 200
+    assert "Download completed total_ms=" in caplog.text
+    assert "transfer_ms=" in caplog.text
+    assert "cached=False" in caplog.text
+    assert "status=200" in caplog.text
+
+
+def test_logs_response_time_for_cached_download(monkeypatch, caplog):
+    @asynccontextmanager
+    async def fake_open_upstream_stream(_endpoint, _authorization):
+        yield UpstreamStream(
+            status_code=200,
+            body_stream=iter_bytes([b"hello"]),
+            headers={"content-type": "text/plain"},
+            cached=True,
+        )
+
+    monkeypatch.setattr("app.main.open_upstream_stream", fake_open_upstream_stream)
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/api/transfers/download",
+            json={"endpoint": "https://provider.example/edc/public", "authorization": "token"},
+        )
+
+    assert response.status_code == 200
+    assert "Download completed total_ms=" in caplog.text
+    assert "transfer_ms=0" in caplog.text
+    assert "cached=True" in caplog.text
+    assert "status=200" in caplog.text
 
 
 def test_returns_problem_details_for_non_json_upstream_error(monkeypatch, caplog):
@@ -254,7 +592,11 @@ def test_returns_problem_details_for_non_json_upstream_error(monkeypatch, caplog
         },
         "upstream_error": {"raw_body": "missing"},
     }
-    assert "Upstream request failed with status 404: missing" in caplog.text
+    assert "Upstream request failed status=404" in caplog.text
+    assert "total_ms=" in caplog.text
+    assert "transfer_ms=" in caplog.text
+    assert "cached=False" in caplog.text
+    assert "body=missing" in caplog.text
 
 
 def test_logs_and_returns_upstream_500_details(monkeypatch, caplog):
@@ -288,7 +630,11 @@ def test_logs_and_returns_upstream_500_details(monkeypatch, caplog):
         },
         "upstream_error": {"errors": ["NOT_FOUND"]},
     }
-    assert 'Upstream request failed with status 500: {"errors":["NOT_FOUND"]}' in caplog.text
+    assert 'Upstream request failed status=500' in caplog.text
+    assert 'total_ms=' in caplog.text
+    assert 'transfer_ms=' in caplog.text
+    assert 'cached=False' in caplog.text
+    assert 'body={"errors":["NOT_FOUND"]}' in caplog.text
 
 
 def test_returns_problem_details_for_unknown_provider_error_code(monkeypatch, caplog):
@@ -322,7 +668,11 @@ def test_returns_problem_details_for_unknown_provider_error_code(monkeypatch, ca
         },
         "upstream_error": {"errors": ["CONFLICT"], "message": "Asset is locked"},
     }
-    assert 'Upstream request failed with status 409: {"errors":["CONFLICT"],"message":"Asset is locked"}' in caplog.text
+    assert 'Upstream request failed status=409' in caplog.text
+    assert 'total_ms=' in caplog.text
+    assert 'transfer_ms=' in caplog.text
+    assert 'cached=False' in caplog.text
+    assert 'body={"errors":["CONFLICT"],"message":"Asset is locked"}' in caplog.text
 
 
 def test_problem_target_uses_original_payload_endpoint(monkeypatch):

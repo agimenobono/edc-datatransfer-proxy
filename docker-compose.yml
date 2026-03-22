@@ -2,5 +2,13 @@ services:
   proxy:
     build:
       context: .
+    environment:
+      PROXY_CACHE_ENABLED: "true"
+      PROXY_CACHE_DIR: /var/cache/edc-proxy
     ports:
       - "8010:8010"
+    volumes:
+      - edc-proxy-cache:/var/cache/edc-proxy
+
+volumes:
+  edc-proxy-cache:
