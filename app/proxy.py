@@ -36,6 +36,21 @@ class CacheEntry:
     file_path: Path | None = None
 
 
+@dataclass(frozen=True)
+class CacheStats:
+    entries: int
+    memory_entries: int
+    disk_entries: int
+    memory_bytes: int
+    disk_bytes: int
+    hits_memory: int
+    hits_disk: int
+    misses: int
+    expired: int
+    evictions_memory: int
+    evictions_disk: int
+
+
 def normalize_endpoint(endpoint: str) -> str:
     return endpoint if endpoint.endswith("/") else f"{endpoint}/"
 
@@ -91,18 +106,31 @@ class UpstreamResponseCache:
         self._entries: OrderedDict[str, CacheEntry] = OrderedDict()
         self._memory_bytes = 0
         self._disk_bytes = 0
+        self._hits_memory = 0
+        self._hits_disk = 0
+        self._misses = 0
+        self._expired = 0
+        self._evictions_memory = 0
+        self._evictions_disk = 0
 
     def get(self, endpoint: str, authorization: str) -> CacheEntry | None:
         key = cache_key(endpoint, authorization)
         entry = self._entries.get(key)
         if entry is None:
+            self._misses += 1
             return None
 
         if entry.expires_at <= monotonic():
             self._remove_entry(key)
+            self._expired += 1
+            self._misses += 1
             return None
 
         self._entries.move_to_end(key)
+        if entry.tier == "memory":
+            self._hits_memory += 1
+        else:
+            self._hits_disk += 1
         return entry
 
     def set(self, endpoint: str, authorization: str, response: CachedUpstreamResponse) -> None:
@@ -174,10 +202,29 @@ class UpstreamResponseCache:
             key, entry = self._entries.popitem(last=False)
             if entry.tier == "memory":
                 self._memory_bytes -= entry.size_bytes
+                self._evictions_memory += 1
             else:
                 self._disk_bytes -= entry.size_bytes
+                self._evictions_disk += 1
                 if entry.file_path is not None and entry.file_path.exists():
                     entry.file_path.unlink()
+
+    def stats(self) -> CacheStats:
+        memory_entries = sum(1 for entry in self._entries.values() if entry.tier == "memory")
+        disk_entries = len(self._entries) - memory_entries
+        return CacheStats(
+            entries=len(self._entries),
+            memory_entries=memory_entries,
+            disk_entries=disk_entries,
+            memory_bytes=self._memory_bytes,
+            disk_bytes=self._disk_bytes,
+            hits_memory=self._hits_memory,
+            hits_disk=self._hits_disk,
+            misses=self._misses,
+            expired=self._expired,
+            evictions_memory=self._evictions_memory,
+            evictions_disk=self._evictions_disk,
+        )
 
 
 class DisabledUpstreamResponseCache:
@@ -186,6 +233,21 @@ class DisabledUpstreamResponseCache:
 
     def set(self, endpoint: str, authorization: str, response: CachedUpstreamResponse) -> None:
         return None
+
+    def stats(self) -> CacheStats:
+        return CacheStats(
+            entries=0,
+            memory_entries=0,
+            disk_entries=0,
+            memory_bytes=0,
+            disk_bytes=0,
+            hits_memory=0,
+            hits_disk=0,
+            misses=0,
+            expired=0,
+            evictions_memory=0,
+            evictions_disk=0,
+        )
 
 
 def build_response_cache_from_env() -> UpstreamResponseCache | DisabledUpstreamResponseCache:

@@ -95,6 +95,16 @@ Cache control:
 - any of `0`, `false`, `no`, or `off` are treated as disabled values, and
 - the default is enabled when the variable is unset.
 
+Cache stats:
+
+- `GET /api/cache/stats` returns the current cache counters,
+- `hits.memory` counts reads served from the in-memory tier,
+- `hits.disk` counts reads served from the on-disk tier,
+- `misses` counts lookup misses, including expired entries that were evicted on access,
+- `expired` counts entries removed because their TTL elapsed,
+- `evictions.memory` and `evictions.disk` count LRU removals from each tier, and
+- `entries`, `memory_entries`, `disk_entries`, `memory_bytes`, and `disk_bytes` report the current cache footprint.
+
 ## Test
 
 Run the test suite with:

@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 import httpx
 
 from app.models import DownloadRequest
-from app.proxy import open_upstream_stream
+from app.proxy import open_upstream_stream, response_cache
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,28 @@ app.add_middleware(
 @app.get("/", include_in_schema=False)
 async def root():
     return RedirectResponse(url="/docs")
+
+
+@app.get("/api/cache/stats")
+async def cache_stats():
+    stats = response_cache.stats()
+    return {
+        "entries": stats.entries,
+        "memory_entries": stats.memory_entries,
+        "disk_entries": stats.disk_entries,
+        "memory_bytes": stats.memory_bytes,
+        "disk_bytes": stats.disk_bytes,
+        "hits": {
+            "memory": stats.hits_memory,
+            "disk": stats.hits_disk,
+        },
+        "misses": stats.misses,
+        "expired": stats.expired,
+        "evictions": {
+            "memory": stats.evictions_memory,
+            "disk": stats.evictions_disk,
+        },
+    }
 
 
 def _problem_detail_for_upstream_error(parsed_body: object | None) -> str:

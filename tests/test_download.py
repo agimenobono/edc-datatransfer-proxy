@@ -241,6 +241,19 @@ def test_proxy_caches_successful_responses(monkeypatch):
     assert calls == ["https://provider.example/edc/public/"]
     assert first == (200, {"content-type": "application/json"}, b'{"cached":true}')
     assert second == (200, {"content-type": "application/json"}, b'{"cached":true}')
+    assert vars(cache.stats()) == {
+        "entries": 1,
+        "memory_entries": 1,
+        "disk_entries": 0,
+        "memory_bytes": len(b'{"cached":true}'),
+        "disk_bytes": 0,
+        "hits_memory": 1,
+        "hits_disk": 0,
+        "misses": 1,
+        "expired": 0,
+        "evictions_memory": 0,
+        "evictions_disk": 0,
+    }
 
 
 def test_proxy_cache_can_be_disabled_from_env(monkeypatch):
@@ -317,6 +330,49 @@ def test_proxy_expires_cached_responses(monkeypatch):
     )
 
     assert cache.get("https://provider.example/edc/public", "token") is None
+    assert vars(cache.stats()) == {
+        "entries": 0,
+        "memory_entries": 0,
+        "disk_entries": 0,
+        "memory_bytes": 0,
+        "disk_bytes": 0,
+        "hits_memory": 0,
+        "hits_disk": 0,
+        "misses": 1,
+        "expired": 1,
+        "evictions_memory": 0,
+        "evictions_disk": 0,
+    }
+
+
+def test_cache_stats_endpoint_reports_counts(monkeypatch):
+    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=60, max_memory_bytes=1024, max_disk_bytes=1024)
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+    monkeypatch.setattr("app.main.response_cache", cache)
+
+    cache.set(
+        "https://provider.example/edc/public",
+        "token",
+        CachedUpstreamResponse(status_code=200, body=b"abc", headers={"content-type": "text/plain"}),
+    )
+
+    assert cache.get("https://provider.example/edc/public", "token") is not None
+    assert cache.get("https://provider.example/edc/missing", "token") is None
+
+    response = client.get("/api/cache/stats")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "entries": 1,
+        "memory_entries": 1,
+        "disk_entries": 0,
+        "memory_bytes": 3,
+        "disk_bytes": 0,
+        "hits": {"memory": 1, "disk": 0},
+        "misses": 1,
+        "expired": 0,
+        "evictions": {"memory": 0, "disk": 0},
+    }
 
 
 def test_proxy_stores_large_responses_on_disk(monkeypatch, tmp_path):
@@ -361,6 +417,19 @@ def test_proxy_stores_large_responses_on_disk(monkeypatch, tmp_path):
     assert entry.tier == "disk"
     assert entry.file_path is not None
     assert entry.file_path.exists()
+    assert vars(cache.stats()) == {
+        "entries": 1,
+        "memory_entries": 0,
+        "disk_entries": 1,
+        "memory_bytes": 0,
+        "disk_bytes": 16,
+        "hits_memory": 0,
+        "hits_disk": 2,
+        "misses": 1,
+        "expired": 0,
+        "evictions_memory": 0,
+        "evictions_disk": 0,
+    }
 
 
 def test_proxy_does_not_cache_failed_responses(monkeypatch):
