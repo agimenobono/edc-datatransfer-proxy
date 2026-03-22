@@ -210,7 +210,7 @@ def test_proxy_follows_redirects():
 
 
 def test_proxy_caches_successful_responses(monkeypatch):
-    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=60, max_body_bytes=1024)
+    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=60, max_memory_bytes=1024, max_disk_bytes=1024)
     monkeypatch.setattr("app.proxy.response_cache", cache)
 
     calls = []
@@ -243,7 +243,7 @@ def test_proxy_caches_successful_responses(monkeypatch):
 
 
 def test_proxy_uses_lru_eviction(monkeypatch):
-    cache = UpstreamResponseCache(max_entries=1, ttl_seconds=60, max_body_bytes=1024)
+    cache = UpstreamResponseCache(max_entries=1, ttl_seconds=60, max_memory_bytes=1024, max_disk_bytes=1024)
     monkeypatch.setattr("app.proxy.response_cache", cache)
 
     cache.set(
@@ -264,7 +264,7 @@ def test_proxy_uses_lru_eviction(monkeypatch):
 
 
 def test_proxy_expires_cached_responses(monkeypatch):
-    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=0, max_body_bytes=1024)
+    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=0, max_memory_bytes=1024, max_disk_bytes=1024)
     monkeypatch.setattr("app.proxy.response_cache", cache)
 
     cache.set(
@@ -273,6 +273,75 @@ def test_proxy_expires_cached_responses(monkeypatch):
         CachedUpstreamResponse(status_code=200, body=b"a", headers={"content-type": "text/plain"}),
     )
 
+    assert cache.get("https://provider.example/edc/public", "token") is None
+
+
+def test_proxy_stores_large_responses_on_disk(monkeypatch, tmp_path):
+    cache = UpstreamResponseCache(
+        max_entries=8,
+        ttl_seconds=60,
+        max_memory_bytes=8,
+        max_disk_bytes=1024,
+        cache_dir=str(tmp_path),
+    )
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/octet-stream"},
+            content=b"0123456789abcdef",
+            request=request,
+        )
+
+    async def fetch():
+        async with build_http_client(transport=httpx.MockTransport(handler)) as upstream_client:
+            async with open_upstream_stream(
+                "https://provider.example/edc/public",
+                "token",
+                client=upstream_client,
+            ) as upstream:
+                body = b"".join([chunk async for chunk in upstream.body_stream])
+                return upstream.status_code, upstream.headers, body
+
+    first = asyncio.run(fetch())
+    second = asyncio.run(fetch())
+
+    assert calls == ["https://provider.example/edc/public/"]
+    assert first == (200, {"content-type": "application/octet-stream"}, b"0123456789abcdef")
+    assert second == (200, {"content-type": "application/octet-stream"}, b"0123456789abcdef")
+    entry = cache.get("https://provider.example/edc/public", "token")
+    assert entry is not None
+    assert entry.tier == "disk"
+    assert entry.file_path is not None
+    assert entry.file_path.exists()
+
+
+def test_proxy_does_not_cache_failed_responses(monkeypatch):
+    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=60, max_memory_bytes=1024, max_disk_bytes=1024)
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+
+    def handler(request):
+        return httpx.Response(404, content=b"missing", request=request)
+
+    async def fetch():
+        async with build_http_client(transport=httpx.MockTransport(handler)) as upstream_client:
+            async with open_upstream_stream(
+                "https://provider.example/edc/public",
+                "token",
+                client=upstream_client,
+            ) as upstream:
+                body = b"".join([chunk async for chunk in upstream.body_stream])
+                return upstream.status_code, body
+
+    first = asyncio.run(fetch())
+    second = asyncio.run(fetch())
+
+    assert first == (404, b"missing")
+    assert second == (404, b"missing")
     assert cache.get("https://provider.example/edc/public", "token") is None
 
 

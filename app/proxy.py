@@ -1,6 +1,9 @@
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from collections import OrderedDict
+from hashlib import sha256
+from pathlib import Path
+from tempfile import mkdtemp
 from time import monotonic
 from typing import AsyncIterator
 
@@ -21,44 +24,24 @@ class CachedUpstreamResponse:
     headers: dict[str, str]
 
 
-class UpstreamResponseCache:
-    def __init__(self, max_entries: int = 128, ttl_seconds: int = 300, max_body_bytes: int = 5_000_000):
-        self.max_entries = max_entries
-        self.ttl_seconds = ttl_seconds
-        self.max_body_bytes = max_body_bytes
-        self._entries: OrderedDict[tuple[str, str], tuple[float, CachedUpstreamResponse]] = OrderedDict()
-
-    def get(self, endpoint: str, authorization: str) -> CachedUpstreamResponse | None:
-        key = (normalize_endpoint(endpoint), authorization)
-        entry = self._entries.get(key)
-        if entry is None:
-            return None
-
-        expires_at, cached = entry
-        if expires_at <= monotonic():
-            self._entries.pop(key, None)
-            return None
-
-        self._entries.move_to_end(key)
-        return cached
-
-    def set(self, endpoint: str, authorization: str, response: CachedUpstreamResponse) -> None:
-        if len(response.body) > self.max_body_bytes:
-            return
-
-        key = (normalize_endpoint(endpoint), authorization)
-        self._entries[key] = (monotonic() + self.ttl_seconds, response)
-        self._entries.move_to_end(key)
-
-        while len(self._entries) > self.max_entries:
-            self._entries.popitem(last=False)
-
-
-response_cache = UpstreamResponseCache()
+@dataclass
+class CacheEntry:
+    status_code: int
+    headers: dict[str, str]
+    expires_at: float
+    size_bytes: int
+    tier: str
+    body: bytes | None = None
+    file_path: Path | None = None
 
 
 def normalize_endpoint(endpoint: str) -> str:
     return endpoint if endpoint.endswith("/") else f"{endpoint}/"
+
+
+def cache_key(endpoint: str, authorization: str) -> str:
+    material = f"{normalize_endpoint(endpoint)}\n{authorization}".encode("utf-8")
+    return sha256(material).hexdigest()
 
 
 def build_http_client(transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
@@ -77,19 +60,162 @@ def _cached_stream(body: bytes) -> AsyncIterator[bytes]:
     return iterator()
 
 
+def _disk_stream(path: Path, chunk_size: int = 64 * 1024) -> AsyncIterator[bytes]:
+    async def iterator():
+        with path.open("rb") as file:
+            while True:
+                chunk = file.read(chunk_size)
+                if not chunk:
+                    break
+                yield chunk
+
+    return iterator()
+
+
+class UpstreamResponseCache:
+    def __init__(
+        self,
+        max_entries: int = 128,
+        ttl_seconds: int = 300,
+        max_memory_bytes: int = 1_000_000,
+        max_disk_bytes: int = 100_000_000,
+        cache_dir: str | None = None,
+    ):
+        self.max_entries = max_entries
+        self.ttl_seconds = ttl_seconds
+        self.max_memory_bytes = max_memory_bytes
+        self.max_disk_bytes = max_disk_bytes
+        self.cache_dir = Path(cache_dir or mkdtemp(prefix="edc-proxy-cache-"))
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._entries: OrderedDict[str, CacheEntry] = OrderedDict()
+        self._memory_bytes = 0
+        self._disk_bytes = 0
+
+    def get(self, endpoint: str, authorization: str) -> CacheEntry | None:
+        key = cache_key(endpoint, authorization)
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+
+        if entry.expires_at <= monotonic():
+            self._remove_entry(key)
+            return None
+
+        self._entries.move_to_end(key)
+        return entry
+
+    def set(self, endpoint: str, authorization: str, response: CachedUpstreamResponse) -> None:
+        if response.status_code >= 400:
+            return
+
+        key = cache_key(endpoint, authorization)
+        expires_at = monotonic() + self.ttl_seconds
+        size_bytes = len(response.body)
+
+        if size_bytes <= self.max_memory_bytes:
+            self._store_memory_entry(key, response, expires_at, size_bytes)
+            return
+
+        if self._disk_bytes + size_bytes > self.max_disk_bytes:
+            return
+
+        file_path = self.cache_dir / key
+        file_path.write_bytes(response.body)
+        self._disk_bytes += size_bytes
+        self._entries[key] = CacheEntry(
+            status_code=response.status_code,
+            headers=response.headers,
+            expires_at=expires_at,
+            size_bytes=size_bytes,
+            tier="disk",
+            file_path=file_path,
+        )
+        self._entries.move_to_end(key)
+        self._enforce_limits()
+
+    def _store_memory_entry(
+        self,
+        key: str,
+        response: CachedUpstreamResponse,
+        expires_at: float,
+        size_bytes: int,
+    ) -> None:
+        previous = self._entries.get(key)
+        if previous is not None:
+            self._remove_entry(key)
+
+        self._entries[key] = CacheEntry(
+            status_code=response.status_code,
+            headers=response.headers,
+            expires_at=expires_at,
+            size_bytes=size_bytes,
+            tier="memory",
+            body=response.body,
+        )
+        self._entries.move_to_end(key)
+        self._memory_bytes += size_bytes
+        self._enforce_limits()
+
+    def _remove_entry(self, key: str) -> None:
+        entry = self._entries.pop(key, None)
+        if entry is None:
+            return
+
+        if entry.tier == "memory":
+            self._memory_bytes -= entry.size_bytes
+        else:
+            self._disk_bytes -= entry.size_bytes
+            if entry.file_path is not None and entry.file_path.exists():
+                entry.file_path.unlink()
+
+    def _enforce_limits(self) -> None:
+        while len(self._entries) > self.max_entries or self._memory_bytes > self.max_memory_bytes:
+            key, entry = self._entries.popitem(last=False)
+            if entry.tier == "memory":
+                self._memory_bytes -= entry.size_bytes
+            else:
+                self._disk_bytes -= entry.size_bytes
+                if entry.file_path is not None and entry.file_path.exists():
+                    entry.file_path.unlink()
+
+
+response_cache = UpstreamResponseCache()
+
+
+def _cache_body_as_stream(response: httpx.Response, endpoint: str, authorization: str):
+    async def iterator():
+        chunks: list[bytes] = []
+        complete = False
+        try:
+            async for chunk in response.aiter_bytes():
+                chunks.append(chunk)
+                yield chunk
+            complete = True
+        finally:
+            if complete and response.status_code < 400:
+                response_cache.set(
+                    endpoint,
+                    authorization,
+                    CachedUpstreamResponse(
+                        status_code=response.status_code,
+                        body=b"".join(chunks),
+                        headers=_filtered_headers(response),
+                    ),
+                )
+
+    return iterator()
+
+
 @asynccontextmanager
 async def open_upstream_stream(
     endpoint: str,
     authorization: str,
     client: httpx.AsyncClient | None = None,
 ):
-    cached = response_cache.get(endpoint, authorization)
-    if cached is not None:
-        yield UpstreamStream(
-            status_code=cached.status_code,
-            body_stream=_cached_stream(cached.body),
-            headers=cached.headers,
-        )
+    entry = response_cache.get(endpoint, authorization)
+    if entry is not None:
+        body_stream = _cached_stream(entry.body) if entry.tier == "memory" else _disk_stream(entry.file_path)
+        yield UpstreamStream(status_code=entry.status_code, body_stream=body_stream, headers=entry.headers)
         return
 
     owns_client = client is None
@@ -102,30 +228,9 @@ async def open_upstream_stream(
 
     try:
         response = await response_context.__aenter__()
-
-        async def caching_body_stream():
-            chunks: list[bytes] = []
-            complete = False
-            try:
-                async for chunk in response.aiter_bytes():
-                    chunks.append(chunk)
-                    yield chunk
-                complete = True
-            finally:
-                if complete and response.status_code < 400:
-                    response_cache.set(
-                        endpoint,
-                        authorization,
-                        CachedUpstreamResponse(
-                            status_code=response.status_code,
-                            body=b"".join(chunks),
-                            headers=_filtered_headers(response),
-                        ),
-                    )
-
         yield UpstreamStream(
             status_code=response.status_code,
-            body_stream=caching_body_stream(),
+            body_stream=_cache_body_as_stream(response, endpoint, authorization),
             headers=_filtered_headers(response),
         )
     finally:

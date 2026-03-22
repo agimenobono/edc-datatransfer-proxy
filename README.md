@@ -70,8 +70,11 @@ Behavior notes:
 - the proxy performs a `GET` request against the provided endpoint,
 - a trailing `/` is added when missing,
 - the `Authorization` header is forwarded exactly as received, and
-- redirects are followed automatically, and
-- successful upstream responses are cached in memory with an LRU eviction policy and TTL to avoid refetching already-loaded resources.
+- redirects are followed automatically,
+- successful upstream responses are cached with a bounded two-tier policy,
+- small hot responses stay in memory,
+- larger responses spill to disk so they do not accumulate in RAM, and
+- TTL is the freshness boundary for cached content.
 
 ## Test
 
