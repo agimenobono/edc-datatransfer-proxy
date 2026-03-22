@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
 import httpx
 
@@ -187,11 +188,14 @@ async def download(payload: DownloadRequest):
                 yield chunk
         finally:
             await upstream_context.__aexit__(None, None, None)
-            transfer_ms = 0 if upstream.cached else int((monotonic() - transfer_started_at) * 1000)
-            log_response(upstream.status_code, upstream.cached, transfer_ms)
+
+    def log_success() -> None:
+        transfer_ms = 0 if upstream.cached else int((monotonic() - transfer_started_at) * 1000)
+        log_response(upstream.status_code, upstream.cached, transfer_ms)
 
     return StreamingResponse(
         body_iterator(),
         status_code=upstream.status_code,
         headers=upstream.headers,
+        background=BackgroundTask(log_success),
     )
