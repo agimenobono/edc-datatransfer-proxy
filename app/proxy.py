@@ -2,6 +2,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from hashlib import sha256
+import os
 from pathlib import Path
 from tempfile import mkdtemp
 from time import monotonic
@@ -179,7 +180,22 @@ class UpstreamResponseCache:
                     entry.file_path.unlink()
 
 
-response_cache = UpstreamResponseCache()
+class DisabledUpstreamResponseCache:
+    def get(self, endpoint: str, authorization: str) -> CacheEntry | None:
+        return None
+
+    def set(self, endpoint: str, authorization: str, response: CachedUpstreamResponse) -> None:
+        return None
+
+
+def build_response_cache_from_env() -> UpstreamResponseCache | DisabledUpstreamResponseCache:
+    enabled = os.getenv("PROXY_CACHE_ENABLED", "true").strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return DisabledUpstreamResponseCache()
+    return UpstreamResponseCache()
+
+
+response_cache = build_response_cache_from_env()
 
 
 def _cache_body_as_stream(response: httpx.Response, endpoint: str, authorization: str):

@@ -2,5 +2,7 @@ services:
   proxy:
     build:
       context: .
+    environment:
+      PROXY_CACHE_ENABLED: "true"
     ports:
       - "8010:8010"

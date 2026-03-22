@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+import importlib
 
 import httpx
 from fastapi.testclient import TestClient
@@ -240,6 +241,48 @@ def test_proxy_caches_successful_responses(monkeypatch):
     assert calls == ["https://provider.example/edc/public/"]
     assert first == (200, {"content-type": "application/json"}, b'{"cached":true}')
     assert second == (200, {"content-type": "application/json"}, b'{"cached":true}')
+
+
+def test_proxy_cache_can_be_disabled_from_env(monkeypatch):
+    monkeypatch.setenv("PROXY_CACHE_ENABLED", "false")
+
+    import app.proxy as proxy_module
+
+    reloaded = importlib.reload(proxy_module)
+
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"cached":false}',
+            request=request,
+        )
+
+    async def fetch():
+        async with reloaded.build_http_client(transport=httpx.MockTransport(handler)) as upstream_client:
+            async with reloaded.open_upstream_stream(
+                "https://provider.example/edc/public",
+                "token",
+                client=upstream_client,
+            ) as upstream:
+                body = b"".join([chunk async for chunk in upstream.body_stream])
+                return upstream.status_code, upstream.headers, body
+
+    first = asyncio.run(fetch())
+    second = asyncio.run(fetch())
+
+    assert calls == [
+        "https://provider.example/edc/public/",
+        "https://provider.example/edc/public/",
+    ]
+    assert first == (200, {"content-type": "application/json"}, b'{"cached":false}')
+    assert second == (200, {"content-type": "application/json"}, b'{"cached":false}')
+    assert isinstance(reloaded.response_cache, reloaded.DisabledUpstreamResponseCache)
+    monkeypatch.delenv("PROXY_CACHE_ENABLED", raising=False)
+    importlib.reload(proxy_module)
 
 
 def test_proxy_uses_lru_eviction(monkeypatch):

@@ -30,12 +30,25 @@ The API will be available at:
 http://localhost:8010/
 ```
 
+To disable proxy-side caching in Docker, set `PROXY_CACHE_ENABLED=false` in the
+environment before starting Compose, for example:
+
+```bash
+PROXY_CACHE_ENABLED=false docker compose up --build
+```
+
 ## Local development
 
 For direct local development, install the project dependencies in a Python 3.13 environment and start the API with:
 
 ```bash
 uvicorn app.main:app --reload --port 8010
+```
+
+To disable proxy-side caching during a local run:
+
+```bash
+PROXY_CACHE_ENABLED=false uvicorn app.main:app --reload --port 8010
 ```
 
 Open the service in a browser at:
@@ -75,6 +88,12 @@ Behavior notes:
 - small hot responses stay in memory,
 - larger responses spill to disk so they do not accumulate in RAM, and
 - TTL is the freshness boundary for cached content.
+
+Cache control:
+
+- set `PROXY_CACHE_ENABLED=false` to disable all proxy-side response caching,
+- any of `0`, `false`, `no`, or `off` are treated as disabled values, and
+- the default is enabled when the variable is unset.
 
 ## Test
 
