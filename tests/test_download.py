@@ -530,8 +530,10 @@ def test_logs_response_time_for_uncached_download(monkeypatch, caplog):
         )
 
     assert response.status_code == 200
-    assert "Download completed in " in caplog.text
-    assert "(cached=False) status=200" in caplog.text
+    assert "Download completed total_ms=" in caplog.text
+    assert "transfer_ms=" in caplog.text
+    assert "cached=False" in caplog.text
+    assert "status=200" in caplog.text
 
 
 def test_logs_response_time_for_cached_download(monkeypatch, caplog):
@@ -553,8 +555,10 @@ def test_logs_response_time_for_cached_download(monkeypatch, caplog):
         )
 
     assert response.status_code == 200
-    assert "Download completed in " in caplog.text
-    assert "(cached=True) status=200" in caplog.text
+    assert "Download completed total_ms=" in caplog.text
+    assert "transfer_ms=0" in caplog.text
+    assert "cached=True" in caplog.text
+    assert "status=200" in caplog.text
 
 
 def test_returns_problem_details_for_non_json_upstream_error(monkeypatch, caplog):
@@ -588,8 +592,11 @@ def test_returns_problem_details_for_non_json_upstream_error(monkeypatch, caplog
         },
         "upstream_error": {"raw_body": "missing"},
     }
-    assert "Upstream request failed with status 404 after " in caplog.text
-    assert "(cached=False): missing" in caplog.text
+    assert "Upstream request failed status=404" in caplog.text
+    assert "total_ms=" in caplog.text
+    assert "transfer_ms=" in caplog.text
+    assert "cached=False" in caplog.text
+    assert "body=missing" in caplog.text
 
 
 def test_logs_and_returns_upstream_500_details(monkeypatch, caplog):
@@ -623,8 +630,11 @@ def test_logs_and_returns_upstream_500_details(monkeypatch, caplog):
         },
         "upstream_error": {"errors": ["NOT_FOUND"]},
     }
-    assert 'Upstream request failed with status 500 after ' in caplog.text
-    assert '(cached=False): {"errors":["NOT_FOUND"]}' in caplog.text
+    assert 'Upstream request failed status=500' in caplog.text
+    assert 'total_ms=' in caplog.text
+    assert 'transfer_ms=' in caplog.text
+    assert 'cached=False' in caplog.text
+    assert 'body={"errors":["NOT_FOUND"]}' in caplog.text
 
 
 def test_returns_problem_details_for_unknown_provider_error_code(monkeypatch, caplog):
@@ -658,8 +668,11 @@ def test_returns_problem_details_for_unknown_provider_error_code(monkeypatch, ca
         },
         "upstream_error": {"errors": ["CONFLICT"], "message": "Asset is locked"},
     }
-    assert 'Upstream request failed with status 409 after ' in caplog.text
-    assert '(cached=False): {"errors":["CONFLICT"],"message":"Asset is locked"}' in caplog.text
+    assert 'Upstream request failed status=409' in caplog.text
+    assert 'total_ms=' in caplog.text
+    assert 'transfer_ms=' in caplog.text
+    assert 'cached=False' in caplog.text
+    assert 'body={"errors":["CONFLICT"],"message":"Asset is locked"}' in caplog.text
 
 
 def test_problem_target_uses_original_payload_endpoint(monkeypatch):

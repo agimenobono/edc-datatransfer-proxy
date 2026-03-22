@@ -143,24 +143,33 @@ async def download(payload: DownloadRequest):
     started_at = monotonic()
     upstream_context = open_upstream_stream(payload.endpoint, payload.authorization)
 
-    def log_response(status_code: int, cached: bool, body: bytes | None = None) -> None:
-        elapsed_ms = int((monotonic() - started_at) * 1000)
-        if body is None:
-            logger.info("Download completed in %s ms (cached=%s) status=%s", elapsed_ms, cached, status_code)
-            return
-        logger.error(
-            "Upstream request failed with status %s after %s ms (cached=%s): %s",
-            status_code,
-            elapsed_ms,
-            cached,
-            body.decode("utf-8", errors="replace"),
-        )
-
     try:
         upstream = await upstream_context.__aenter__()
     except httpx.HTTPError as exc:
         logger.exception("Upstream request failed: %s", exc)
         return _build_transport_problem_response(payload.endpoint)
+
+    transfer_started_at = monotonic()
+
+    def log_response(status_code: int, cached: bool, transfer_ms: int, body: bytes | None = None) -> None:
+        total_ms = int((monotonic() - started_at) * 1000)
+        if body is None:
+            logger.info(
+                "Download completed total_ms=%s transfer_ms=%s cached=%s status=%s",
+                total_ms,
+                transfer_ms,
+                cached,
+                status_code,
+            )
+            return
+        logger.error(
+            "Upstream request failed status=%s total_ms=%s transfer_ms=%s cached=%s body=%s",
+            status_code,
+            total_ms,
+            transfer_ms,
+            cached,
+            body.decode("utf-8", errors="replace"),
+        )
 
     if upstream.status_code >= 400:
         try:
@@ -168,7 +177,8 @@ async def download(payload: DownloadRequest):
         finally:
             await upstream_context.__aexit__(None, None, None)
 
-        log_response(upstream.status_code, upstream.cached, body)
+        transfer_ms = 0 if upstream.cached else int((monotonic() - transfer_started_at) * 1000)
+        log_response(upstream.status_code, upstream.cached, transfer_ms, body)
         return _build_upstream_problem_response(upstream.status_code, body, payload.endpoint)
 
     async def body_iterator():
@@ -177,7 +187,8 @@ async def download(payload: DownloadRequest):
                 yield chunk
         finally:
             await upstream_context.__aexit__(None, None, None)
-            log_response(upstream.status_code, upstream.cached)
+            transfer_ms = 0 if upstream.cached else int((monotonic() - transfer_started_at) * 1000)
+            log_response(upstream.status_code, upstream.cached, transfer_ms)
 
     return StreamingResponse(
         body_iterator(),
