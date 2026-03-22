@@ -506,6 +506,51 @@ def test_streams_successful_upstream_response(monkeypatch):
     assert response.headers["content-type"].startswith("text/plain")
 
 
+def test_logs_response_time_for_uncached_download(monkeypatch, caplog):
+    @asynccontextmanager
+    async def fake_open_upstream_stream(_endpoint, _authorization):
+        yield UpstreamStream(
+            status_code=200,
+            body_stream=iter_bytes([b"hello"]),
+            headers={"content-type": "text/plain"},
+        )
+
+    monkeypatch.setattr("app.main.open_upstream_stream", fake_open_upstream_stream)
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/api/transfers/download",
+            json={"endpoint": "https://provider.example/edc/public", "authorization": "token"},
+        )
+
+    assert response.status_code == 200
+    assert "Download completed in " in caplog.text
+    assert "(cached=False) status=200" in caplog.text
+
+
+def test_logs_response_time_for_cached_download(monkeypatch, caplog):
+    @asynccontextmanager
+    async def fake_open_upstream_stream(_endpoint, _authorization):
+        yield UpstreamStream(
+            status_code=200,
+            body_stream=iter_bytes([b"hello"]),
+            headers={"content-type": "text/plain"},
+            cached=True,
+        )
+
+    monkeypatch.setattr("app.main.open_upstream_stream", fake_open_upstream_stream)
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(
+            "/api/transfers/download",
+            json={"endpoint": "https://provider.example/edc/public", "authorization": "token"},
+        )
+
+    assert response.status_code == 200
+    assert "Download completed in " in caplog.text
+    assert "(cached=True) status=200" in caplog.text
+
+
 def test_returns_problem_details_for_non_json_upstream_error(monkeypatch, caplog):
     @asynccontextmanager
     async def fake_open_upstream_stream(_endpoint, _authorization):
@@ -537,7 +582,8 @@ def test_returns_problem_details_for_non_json_upstream_error(monkeypatch, caplog
         },
         "upstream_error": {"raw_body": "missing"},
     }
-    assert "Upstream request failed with status 404: missing" in caplog.text
+    assert "Upstream request failed with status 404 after " in caplog.text
+    assert "(cached=False): missing" in caplog.text
 
 
 def test_logs_and_returns_upstream_500_details(monkeypatch, caplog):
@@ -571,7 +617,8 @@ def test_logs_and_returns_upstream_500_details(monkeypatch, caplog):
         },
         "upstream_error": {"errors": ["NOT_FOUND"]},
     }
-    assert 'Upstream request failed with status 500: {"errors":["NOT_FOUND"]}' in caplog.text
+    assert 'Upstream request failed with status 500 after ' in caplog.text
+    assert '(cached=False): {"errors":["NOT_FOUND"]}' in caplog.text
 
 
 def test_returns_problem_details_for_unknown_provider_error_code(monkeypatch, caplog):
@@ -605,7 +652,8 @@ def test_returns_problem_details_for_unknown_provider_error_code(monkeypatch, ca
         },
         "upstream_error": {"errors": ["CONFLICT"], "message": "Asset is locked"},
     }
-    assert 'Upstream request failed with status 409: {"errors":["CONFLICT"],"message":"Asset is locked"}' in caplog.text
+    assert 'Upstream request failed with status 409 after ' in caplog.text
+    assert '(cached=False): {"errors":["CONFLICT"],"message":"Asset is locked"}' in caplog.text
 
 
 def test_problem_target_uses_original_payload_endpoint(monkeypatch):

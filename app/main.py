@@ -1,5 +1,6 @@
 import logging
 from json import JSONDecodeError, loads
+from time import monotonic
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -139,7 +140,21 @@ def _build_upstream_problem_response(status_code: int, body: bytes, endpoint: st
 
 @app.post("/api/transfers/download")
 async def download(payload: DownloadRequest):
+    started_at = monotonic()
     upstream_context = open_upstream_stream(payload.endpoint, payload.authorization)
+
+    def log_response(status_code: int, cached: bool, body: bytes | None = None) -> None:
+        elapsed_ms = int((monotonic() - started_at) * 1000)
+        if body is None:
+            logger.info("Download completed in %s ms (cached=%s) status=%s", elapsed_ms, cached, status_code)
+            return
+        logger.error(
+            "Upstream request failed with status %s after %s ms (cached=%s): %s",
+            status_code,
+            elapsed_ms,
+            cached,
+            body.decode("utf-8", errors="replace"),
+        )
 
     try:
         upstream = await upstream_context.__aenter__()
@@ -153,11 +168,7 @@ async def download(payload: DownloadRequest):
         finally:
             await upstream_context.__aexit__(None, None, None)
 
-        logger.error(
-            "Upstream request failed with status %s: %s",
-            upstream.status_code,
-            body.decode("utf-8", errors="replace"),
-        )
+        log_response(upstream.status_code, upstream.cached, body)
         return _build_upstream_problem_response(upstream.status_code, body, payload.endpoint)
 
     async def body_iterator():
@@ -166,6 +177,7 @@ async def download(payload: DownloadRequest):
                 yield chunk
         finally:
             await upstream_context.__aexit__(None, None, None)
+            log_response(upstream.status_code, upstream.cached)
 
     return StreamingResponse(
         body_iterator(),

@@ -16,6 +16,7 @@ class UpstreamStream:
     status_code: int
     body_stream: AsyncIterator[bytes]
     headers: dict[str, str]
+    cached: bool = False
 
 
 @dataclass(frozen=True)
@@ -334,7 +335,7 @@ async def open_upstream_stream(
     entry = response_cache.get(endpoint, authorization)
     if entry is not None:
         body_stream = _cached_stream(entry.body) if entry.tier == "memory" else _disk_stream(entry.file_path)
-        yield UpstreamStream(status_code=entry.status_code, body_stream=body_stream, headers=entry.headers)
+        yield UpstreamStream(status_code=entry.status_code, body_stream=body_stream, headers=entry.headers, cached=True)
         return
 
     owns_client = client is None
@@ -351,6 +352,7 @@ async def open_upstream_stream(
             status_code=response.status_code,
             body_stream=_cache_body_as_stream(response, endpoint, authorization),
             headers=_filtered_headers(response),
+            cached=False,
         )
     finally:
         await response_context.__aexit__(None, None, None)
