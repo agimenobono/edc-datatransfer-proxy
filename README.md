@@ -70,7 +70,8 @@ Behavior notes:
 - the proxy performs a `GET` request against the provided endpoint,
 - a trailing `/` is added when missing,
 - the `Authorization` header is forwarded exactly as received, and
-- redirects are followed automatically.
+- redirects are followed automatically, and
+- successful upstream responses are cached in memory with an LRU eviction policy and TTL to avoid refetching already-loaded resources.
 
 ## Test
 

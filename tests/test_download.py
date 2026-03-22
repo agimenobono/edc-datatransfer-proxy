@@ -6,7 +6,14 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.proxy import UpstreamStream, build_http_client, normalize_endpoint, open_upstream_stream
+from app.proxy import (
+    CachedUpstreamResponse,
+    UpstreamResponseCache,
+    UpstreamStream,
+    build_http_client,
+    normalize_endpoint,
+    open_upstream_stream,
+)
 
 
 client = TestClient(app)
@@ -200,6 +207,73 @@ def test_proxy_follows_redirects():
         assert body == b"redirected"
 
     asyncio.run(run())
+
+
+def test_proxy_caches_successful_responses(monkeypatch):
+    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=60, max_body_bytes=1024)
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"cached":true}',
+            request=request,
+        )
+
+    async def fetch():
+        async with build_http_client(transport=httpx.MockTransport(handler)) as upstream_client:
+            async with open_upstream_stream(
+                "https://provider.example/edc/public",
+                "token",
+                client=upstream_client,
+            ) as upstream:
+                body = b"".join([chunk async for chunk in upstream.body_stream])
+                return upstream.status_code, upstream.headers, body
+
+    first = asyncio.run(fetch())
+    second = asyncio.run(fetch())
+
+    assert calls == ["https://provider.example/edc/public/"]
+    assert first == (200, {"content-type": "application/json"}, b'{"cached":true}')
+    assert second == (200, {"content-type": "application/json"}, b'{"cached":true}')
+
+
+def test_proxy_uses_lru_eviction(monkeypatch):
+    cache = UpstreamResponseCache(max_entries=1, ttl_seconds=60, max_body_bytes=1024)
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+
+    cache.set(
+        "https://provider.example/edc/public",
+        "token-a",
+        CachedUpstreamResponse(status_code=200, body=b"a", headers={"content-type": "text/plain"}),
+    )
+    cache.set(
+        "https://provider.example/edc/other",
+        "token-b",
+        CachedUpstreamResponse(status_code=200, body=b"b", headers={"content-type": "text/plain"}),
+    )
+
+    assert cache.get("https://provider.example/edc/public", "token-a") is None
+    cached = cache.get("https://provider.example/edc/other", "token-b")
+    assert cached is not None
+    assert cached.body == b"b"
+
+
+def test_proxy_expires_cached_responses(monkeypatch):
+    cache = UpstreamResponseCache(max_entries=8, ttl_seconds=0, max_body_bytes=1024)
+    monkeypatch.setattr("app.proxy.response_cache", cache)
+
+    cache.set(
+        "https://provider.example/edc/public",
+        "token",
+        CachedUpstreamResponse(status_code=200, body=b"a", headers={"content-type": "text/plain"}),
+    )
+
+    assert cache.get("https://provider.example/edc/public", "token") is None
 
 
 def test_streams_successful_upstream_response(monkeypatch):
