@@ -39,6 +39,34 @@ def test_root_redirects_to_docs():
     assert response.headers["location"] == "/docs"
 
 
+def test_startup_logs_cache_configuration(monkeypatch, caplog):
+    class FakeResponseCache:
+        def configuration(self):
+            return type(
+                "Config",
+                (),
+                {
+                    "enabled": False,
+                    "backend": "disabled",
+                    "cache_dir": "/var/cache/edc-proxy",
+                    "max_entries": 128,
+                    "ttl_seconds": 300,
+                    "max_memory_bytes": 1_000_000,
+                    "max_disk_bytes": 100_000_000,
+                },
+            )()
+
+    monkeypatch.setattr("app.main.response_cache", FakeResponseCache())
+
+    with caplog.at_level(logging.INFO):
+        with TestClient(app):
+            pass
+
+    assert "Response cache configured: enabled=False" in caplog.text
+    assert "backend=disabled" in caplog.text
+    assert "cache_dir=/var/cache/edc-proxy" in caplog.text
+
+
 def test_cors_preflight_is_allowed():
     response = client.options(
         "/api/transfers/download",

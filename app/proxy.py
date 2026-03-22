@@ -51,6 +51,17 @@ class CacheStats:
     evictions_disk: int
 
 
+@dataclass(frozen=True)
+class CacheConfiguration:
+    enabled: bool
+    cache_dir: str
+    max_entries: int
+    ttl_seconds: int
+    max_memory_bytes: int
+    max_disk_bytes: int
+    backend: str
+
+
 def normalize_endpoint(endpoint: str) -> str:
     return endpoint if endpoint.endswith("/") else f"{endpoint}/"
 
@@ -112,6 +123,17 @@ class UpstreamResponseCache:
         self._expired = 0
         self._evictions_memory = 0
         self._evictions_disk = 0
+
+    def configuration(self) -> CacheConfiguration:
+        return CacheConfiguration(
+            enabled=True,
+            cache_dir=str(self.cache_dir),
+            max_entries=self.max_entries,
+            ttl_seconds=self.ttl_seconds,
+            max_memory_bytes=self.max_memory_bytes,
+            max_disk_bytes=self.max_disk_bytes,
+            backend="enabled",
+        )
 
     def get(self, endpoint: str, authorization: str) -> CacheEntry | None:
         key = cache_key(endpoint, authorization)
@@ -228,6 +250,13 @@ class UpstreamResponseCache:
 
 
 class DisabledUpstreamResponseCache:
+    def __init__(self, cache_dir: str | None = None, max_entries: int = 128, ttl_seconds: int = 300, max_memory_bytes: int = 1_000_000, max_disk_bytes: int = 100_000_000):
+        self.cache_dir = str(Path(cache_dir or mkdtemp(prefix="edc-proxy-cache-")))
+        self.max_entries = max_entries
+        self.ttl_seconds = ttl_seconds
+        self.max_memory_bytes = max_memory_bytes
+        self.max_disk_bytes = max_disk_bytes
+
     def get(self, endpoint: str, authorization: str) -> CacheEntry | None:
         return None
 
@@ -249,12 +278,24 @@ class DisabledUpstreamResponseCache:
             evictions_disk=0,
         )
 
+    def configuration(self) -> CacheConfiguration:
+        return CacheConfiguration(
+            enabled=False,
+            cache_dir=self.cache_dir,
+            max_entries=self.max_entries,
+            ttl_seconds=self.ttl_seconds,
+            max_memory_bytes=self.max_memory_bytes,
+            max_disk_bytes=self.max_disk_bytes,
+            backend="disabled",
+        )
+
 
 def build_response_cache_from_env() -> UpstreamResponseCache | DisabledUpstreamResponseCache:
     enabled = os.getenv("PROXY_CACHE_ENABLED", "true").strip().lower()
+    cache_dir = os.getenv("PROXY_CACHE_DIR")
     if enabled in {"0", "false", "no", "off"}:
-        return DisabledUpstreamResponseCache()
-    return UpstreamResponseCache()
+        return DisabledUpstreamResponseCache(cache_dir=cache_dir)
+    return UpstreamResponseCache(cache_dir=cache_dir)
 
 
 response_cache = build_response_cache_from_env()

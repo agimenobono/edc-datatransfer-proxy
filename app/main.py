@@ -23,6 +23,21 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def log_cache_configuration():
+    config = response_cache.configuration()
+    logger.info(
+        "Response cache configured: enabled=%s backend=%s cache_dir=%s max_entries=%s ttl_seconds=%s max_memory_bytes=%s max_disk_bytes=%s",
+        config.enabled,
+        config.backend,
+        config.cache_dir,
+        config.max_entries,
+        config.ttl_seconds,
+        config.max_memory_bytes,
+        config.max_disk_bytes,
+    )
+
+
 @app.get("/", include_in_schema=False)
 async def root():
     return RedirectResponse(url="/docs")
