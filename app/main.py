@@ -14,8 +14,7 @@ from app.models import DownloadRequest
 from app.proxy import open_upstream_stream, response_cache
 
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = logging.getLogger("uvicorn.error")
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
