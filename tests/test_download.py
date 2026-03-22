@@ -67,6 +67,12 @@ def test_startup_logs_cache_configuration(monkeypatch, caplog):
     assert "cache_dir=/var/cache/edc-proxy" in caplog.text
 
 
+def test_app_logger_is_configured_for_info_output():
+    from app.main import logger
+
+    assert logger.level == logging.INFO
+
+
 def test_cors_preflight_is_allowed():
     response = client.options(
         "/api/transfers/download",

@@ -15,6 +15,7 @@ from app.proxy import open_upstream_stream, response_cache
 
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
