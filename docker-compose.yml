@@ -3,7 +3,7 @@ services:
     build:
       context: .
     environment:
-      PROXY_CACHE_ENABLED: "true"
+      PROXY_CACHE_ENABLED: "false"
       PROXY_CACHE_DIR: /var/cache/edc-proxy
     ports:
       - "8010:8010"
